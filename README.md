@@ -13,11 +13,11 @@ Sistema automatizado de backups para MongoDB Atlas usando Docker. Soporta múlti
 - ✅ **Notificaciones Telegram**: Alertas de éxito o fallos
 - ✅ **Programación flexible**: Ejecución única o CRON scheduling
 - ✅ **Health checks**: Monitoreo del estado del servicio
-- ✅ **Dockerizado**: Fácil despliegue con Docker Compose
+- ✅ **Dockerizado**: Fácil despliegue con docker-compose
 
 ## 🛠️ Requisitos Previos
 
-- **Docker** y **Docker Compose** instalados
+- **Docker** y **docker-compose** instalados
 - **MongoDB Atlas** con usuario de solo lectura (recomendado)
 - **AWS S3** (opcional para almacenamiento en la nube)
 - **Bot de Telegram** (opcional para notificaciones)
@@ -66,13 +66,13 @@ S3_BUCKET=mi-bucket-backups
 
 ```bash
 # Construir la imagen
-docker compose build
+docker-compose build
 
 # Ejecutar en background
-docker compose up -d
+docker-compose up -d
 
 # Ver logs en tiempo real
-docker compose logs -f
+docker-compose logs -f
 ```
 
 ## 🔧 Configuración Detallada
@@ -254,7 +254,7 @@ Deja `CRON_SCHEDULE` vacío para ejecutar el backup una sola vez:
 ### Ver logs en tiempo real
 
 ```bash
-docker compose logs -f backup
+docker-compose logs -f backup
 ```
 
 ### Health Check
@@ -344,26 +344,26 @@ Política mínima para S3:
 
 ## 🔄 Comandos Útiles
 
-### Docker Compose
+### docker-compose
 
 ```bash
 # Construir imagen
-docker compose build
+docker-compose build
 
 # Ejecutar en background
-docker compose up -d
+docker-compose up -d
 
 # Parar servicio
-docker compose down
+docker-compose down
 
 # Ver logs
-docker compose logs -f
+docker-compose logs -f
 
 # Reiniciar servicio
-docker compose restart
+docker-compose restart
 
 # Ejecutar backup manualmente
-docker compose exec backup /app/backup.sh
+docker-compose exec backup /app/backup.sh
 ```
 
 ### Gestión de Backups
