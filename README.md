@@ -1,5 +1,7 @@
 # MongoDB Atlas Backup Tool 🗄️
 
+**[🇺🇸 English](README_EN.md) | 🇪🇸 Español**
+
 Sistema automatizado de backups para MongoDB Atlas usando Docker. Soporta múltiples bases de datos, subida automática a AWS S3, notificaciones por Telegram y ejecución programada con CRON.
 
 ## 🚀 Características
