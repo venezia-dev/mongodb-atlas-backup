@@ -2,18 +2,18 @@
 
 **[🇺🇸 English](README_EN.md) | 🇪🇸 Español**
 
-Sistema automatizado de backups para MongoDB Atlas usando Docker. Soporta múltiples bases de datos, subida automática a AWS S3, notificaciones por Telegram y ejecución programada con CRON.
+Sistema automatizado de backups y restauración para MongoDB Atlas usando Docker. Genera archivos `.archive.gz` válidos con validación de integridad, logs estructurados y herramientas de restauración segura.
 
 ## 🚀 Características
 
-- ✅ **Backups automáticos** con `mongodump` y compresión gzip
-- ✅ **Múltiples modos**: Una BD, varias BDs o todo el cluster
-- ✅ **Almacenamiento S3**: Upload automático con multipart para archivos grandes
-- ✅ **Retención automática**: Eliminación de backups antiguos por días
-- ✅ **Notificaciones Telegram**: Alertas de éxito o fallos
-- ✅ **Programación flexible**: Ejecución única o CRON scheduling
-- ✅ **Health checks**: Monitoreo del estado del servicio
-- ✅ **Dockerizado**: Fácil despliegue con docker-compose
+- ✅ **Backups automáticos** con archivos `.archive.gz` siempre válidos
+- ✅ **Validación de integridad** real con `mongorestore --dryRun`
+- ✅ **Logs estructurados** con timestamps y salida a archivo
+- ✅ **Restauración segura** con backup automático antes de sobrescribir
+- ✅ **Variables simplificadas** para fácil configuración
+- ✅ **S3 opcional** con `aws s3 cp` y flags de seguridad
+- ✅ **Exit codes precisos** para monitoreo automatizado
+- ✅ **Dockerizado** para despliegue consistente
 
 ## 🛠️ Requisitos Previos
 
@@ -40,26 +40,24 @@ cp .env.example .env
 Edita el archivo `.env` con tus configuraciones:
 
 ```env
-# Conexión a MongoDB Atlas
-MONGO_URI="mongodb+srv://USER:PASS@cluster.mongodb.net/?retryWrites=true&w=majority"
+# Obligatorio
+MONGODB_URI="mongodb+srv://USER:PASS@cluster.mongodb.net"
 
-# Bases de datos a respaldar (separadas por comas)
-MONGO_DBS="webapp,api,logs,analytics"
+# Opcional - Bases de datos específicas (vacío = todas)
+DBS="prod,prepro,test"
 
 # Configuración de backups
-RETENTION_DAYS=14
+DEST_DIR="/backups"
+RETENTION_DAYS=7
+FILE_PREFIX="backup"
+LOG_DIR="/backups/logs"
+
+# S3 (opcional)
+S3_BUCKET="mi-bucket-backups"
+KEEP_LOCAL="true"
+
+# Programación CRON
 CRON_SCHEDULE="0 3 * * *"  # Diario a las 3 AM
-
-# Notificaciones Telegram (opcional)
-NOTIFY_ON="fail"
-TELEGRAM_TOKEN="tu_bot_token"
-TELEGRAM_CHAT_ID="tu_chat_id"
-
-# AWS S3 (opcional)
-S3_UPLOAD=true
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=tu_clave_secreta
-S3_BUCKET=mi-bucket-backups
 ```
 
 ### 3. Construir y ejecutar
@@ -81,13 +79,16 @@ docker-compose logs -f
 
 | Variable | Descripción | Ejemplo | Requerido |
 |----------|-------------|---------|-----------|
-| `MONGO_URI` | URI de conexión a MongoDB Atlas | `mongodb+srv://user:pass@cluster.mongodb.net/` | ✅ |
-| `MONGO_DBS` | Bases de datos múltiples (separadas por comas) | `webapp,api,logs` | ⚠️ |
-| `MONGO_DB` | Una sola base de datos | `webapp` | ⚠️ |
-| `RETENTION_DAYS` | Días de retención de backups locales | `14` | ✅ |
-| `CRON_SCHEDULE` | Programación CRON (vacío = ejecución única) | `0 3 * * *` | ❌ |
+| `MONGODB_URI` | URI de conexión a MongoDB Atlas | `mongodb+srv://user:pass@cluster.mongodb.net` | ✅ |
+| `DBS` | Bases de datos específicas (vacío = todas) | `prod,prepro,test` | ❌ |
+| `DEST_DIR` | Directorio destino para backups | `/backups` | ❌ |
+| `RETENTION_DAYS` | Días de retención de backups | `7` | ❌ |
+| `FILE_PREFIX` | Prefijo de archivos de backup | `backup` | ❌ |
+| `LOG_DIR` | Directorio para logs | `/backups/logs` | ❌ |
+| `S3_BUCKET` | Bucket S3 para upload automático | `mi-bucket` | ❌ |
+| `KEEP_LOCAL` | Mantener archivos locales tras S3 | `true` | ❌ |
 
-⚠️ **Nota**: Debes configurar `MONGO_DBS` O `MONGO_DB` O ninguna (para todas las BDs).
+✨ **Mejoras implementadas**: Archivos siempre válidos `.archive.gz`, validación real, logs estructurados, exit codes precisos.
 
 ### Configuración de AWS S3
 
@@ -488,4 +489,94 @@ NOTIFY_ON="both"
 S3_UPLOAD=false
 ```
 
-¡Listo para usar! 🚀
+## 🔄 Restauración (MANUAL - Solo cuando lo necesites)
+
+> ⚠️ **IMPORTANTE**: El script `restore.sh` NO se ejecuta automáticamente. Solo lo usas manualmente cuando necesites restaurar datos.
+
+### ¿Cuándo usar restore.sh?
+
+- 🆘 **Recuperación ante desastres** (corrupción de datos, errores)
+- 🧪 **Testing seguro** (copiar prod → prepro para pruebas)
+- 🔄 **Rollback** tras un deploy problemático
+- 📋 **Migración de datos** entre entornos
+
+### En el Servidor Docker
+
+- ✅ Solo se ejecuta `backup.sh` automáticamente (vía cron)
+- ✅ `restore.sh` está disponible para emergencias
+- ❌ Nunca se ejecuta automáticamente
+
+### Uso Típico en Local
+
+```bash
+# 1. Descargar backup del servidor
+scp server:/backups/backup_prod_20250915_120000.archive.gz .
+
+# 2. Restaurar prod a prepro local (SEGURO)
+MONGODB_URI="mongodb://localhost:27017" ./restore.sh backup_prod_20250915_120000.archive.gz prepro prod
+
+# 3. Restaurar backup completo
+MONGODB_URI="..." ./restore.sh backup_all_20250915_120000.archive.gz
+```
+
+### Casos de Uso Comunes
+
+```bash
+# Copiar prod a prepro (testing seguro)
+./restore.sh backup_prod_20250915_120000.archive.gz prepro prod
+
+# Rollback a estado anterior
+./restore.sh backup_prod_20250914_120000.archive.gz prod prod
+
+# Restaurar BD específica
+./restore.sh backup_test_20250915_120000.archive.gz test test
+```
+
+### Características de Seguridad
+
+- 🛡️ **Validación previa**: Verifica que el archivo sea válido
+- 💾 **Backup automático**: Crea copia de seguridad antes de sobrescribir
+- 🔄 **Rollback automático**: Restaura estado anterior si falla
+- ⚠️ **Confirmaciones**: Pide confirmación para operaciones peligrosas
+
+## 🔧 Archivos Generados
+
+### Estructura de Backups
+
+```
+/backups/
+├── logs/
+│   ├── backup_20250915_120000.log
+│   └── backup_20250915_140000.log
+├── backup_prod_20250915_120000.archive.gz
+├── backup_prepro_20250915_120000.archive.gz
+└── backup_all_20250915_140000.archive.gz
+```
+
+### Formato de Archivos
+
+✅ **Siempre válidos**: `backup_[db]_YYYYMMDD_HHMMSS.archive.gz`  
+✅ **Compatibles**: `mongorestore --archive --gzip`  
+✅ **Verificados**: Validación automática post-backup  
+
+### Logs Estructurados
+
+```
+[2025-09-15 12:00:01] [INFO] === Iniciando backup MongoDB ===
+[2025-09-15 12:00:01] [INFO] URI: mongodb+srv://***@cluster.mongodb.net/**
+[2025-09-15 12:00:01] [INFO] BDs específicas: prod,prepro
+[2025-09-15 12:00:05] [INFO] Backup exitoso: prod
+[2025-09-15 12:00:10] [INFO] Validación OK: backup_prod_20250915_120000.archive.gz
+[2025-09-15 12:00:15] [INFO] === Resumen final ===
+[2025-09-15 12:00:15] [INFO] Exitosos: 2
+```
+
+## 🚀 ¡Ya está listo para usar!
+
+Tu sistema de backup MongoDB Atlas está optimizado con:
+
+- **Archivos siempre válidos** (no más errores de gzip)
+- **Restauración segura** incluida
+- **Logs claros** para debugging
+- **Variables simplificadas** para configuración fácil
+- **S3 opcional** con aws cli estándar

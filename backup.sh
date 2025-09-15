@@ -1,154 +1,163 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${OUTPUT_DIR:=/backups}"
-: "${RETENTION_DAYS:=0}"
+: "${MONGODB_URI:?MONGODB_URI requerido}"
+: "${DBS:=}"
+: "${DEST_DIR:=/backups}"
+: "${RETENTION_DAYS:=7}"
+: "${FILE_PREFIX:=backup}"
+: "${LOG_DIR:=${DEST_DIR}/logs}"
+
 NOW="$(date +'%Y%m%d_%H%M%S')"
+LOG_FILE="${LOG_DIR}/backup_${NOW}.log"
 
-# Variables para tracking de errores
-FAILED_DBS=()
-SUCCESS_COUNT=0
-TOTAL_COUNT=0
-
-notify_error() {
-  local db_name="$1"
-  local error_msg="$2"
-  if [[ "${NOTIFY_ON:-fail}" =~ ^(fail|both)$ ]]; then
-    /app/notify.sh error "❌ Backup FAILED $(date -Is)
-DB: ${db_name}
-Error: ${error_msg}" || true
-  fi
+log() {
+  local level="$1"
+  shift
+  local timestamp="$(date +'%Y-%m-%d %H:%M:%S')"
+  local message="[$timestamp] [$level] $*"
+  echo "$message" | tee -a "$LOG_FILE" >&2
 }
 
-notify_summary() {
-  if [ ${#FAILED_DBS[@]} -gt 0 ]; then
-    local failed_list=$(IFS=', '; echo "${FAILED_DBS[*]}")
-    /app/notify.sh error "📊 Backup Summary $(date -Is)
-✅ Exitosos: ${SUCCESS_COUNT}/${TOTAL_COUNT}
-❌ Fallidos: ${failed_list}" || true
-  elif [[ "${NOTIFY_ON:-fail}" =~ ^(both|success)$ ]]; then
-    /app/notify.sh info "✅ Backup Completo $(date -Is)
-Todas las ${SUCCESS_COUNT} bases de datos respaldadas correctamente" || true
+log_info() { log "INFO" "$@"; }
+log_error() { log "ERROR" "$@"; }
+log_warn() { log "WARN" "$@"; }
+
+validate_archive() {
+  local archive="$1"
+  log_info "Validando integridad: $(basename "$archive")"
+  
+  if ! [ -f "$archive" ]; then
+    log_error "Archivo no encontrado: $archive"
+    return 1
   fi
+  
+  if ! mongorestore --archive="$archive" --gzip --dryRun 2>/dev/null; then
+    log_error "Archivo no es un archive válido de mongodump"
+    return 1
+  fi
+  
+  log_info "Validación OK: $(basename "$archive")"
+  return 0
 }
 
-backup_single_db() {
+backup_database() {
   local db_name="$1"
-  local archive_name="${BACKUP_PREFIX:-backup}_${db_name}_${NOW}.gz"
-  local archive_path="${OUTPUT_DIR}/${archive_name}"
+  local archive_file="${DEST_DIR}/${FILE_PREFIX}_${db_name}_${NOW}.archive.gz"
   
-  echo "Iniciando backup de: ${db_name}"
+  log_info "Iniciando backup: $db_name -> $(basename "$archive_file")"
   
-  if mongodump --uri="$MONGO_URI" --db="$db_name" --archive="$archive_path" --gzip; then
-    echo "✅ Backup exitoso: ${archive_path}"
+  if mongodump --uri="$MONGODB_URI" --db="$db_name" --archive="$archive_file" --gzip; then
+    log_info "Dump completado: $db_name"
     
-    # Upload to S3 if configured
-    if [[ "${S3_UPLOAD:-false}" == "true" ]]; then
-      echo "Subiendo ${db_name} a S3..."
-      if python3 /app/s3_upload.py "$archive_path"; then
-        echo "✅ Upload S3 exitoso para: ${db_name}"
-        # Remove local file if configured
-        if [[ "${KEEP_LOCAL_BACKUP:-true}" == "false" ]]; then
-          rm -f "$archive_path"
-          echo "🗑️  Archivo local eliminado: ${archive_name}"
-        fi
-      else
-        echo "❌ Error en upload S3 de: ${db_name}"
-        notify_error "$db_name" "Upload a S3 falló"
-        FAILED_DBS+=("${db_name}_S3")
-        return 1
+    if validate_archive "$archive_file"; then
+      log_info "Backup exitoso: $db_name"
+      
+      if [[ "${S3_BUCKET:-}" ]]; then
+        s3_upload "$archive_file"
       fi
+      
+      return 0
+    else
+      rm -f "$archive_file"
+      log_error "Backup inválido removido: $db_name"
+      return 1
     fi
-    
-    ((SUCCESS_COUNT++))
-    return 0
   else
-    echo "❌ Error en backup de: ${db_name}"
-    FAILED_DBS+=("$db_name")
-    notify_error "$db_name" "mongodump falló"
+    log_error "mongodump falló: $db_name"
     return 1
   fi
 }
 
-if [ -z "${MONGO_URI:-}" ]; then
-  echo "ERROR: MONGO_URI no está configurado."
-  exit 1
-fi
-
-mkdir -p "$OUTPUT_DIR"
-
-# Determinar qué bases de datos respaldar
-if [ -n "${MONGO_DBS:-}" ]; then
-  # Múltiples bases de datos separadas por comas
-  echo "Modo múltiples BD: ${MONGO_DBS}"
-  IFS=',' read -ra DBS_ARRAY <<< "${MONGO_DBS}"
-  TOTAL_COUNT=${#DBS_ARRAY[@]}
+s3_upload() {
+  local file="$1"
+  local s3_key="${FILE_PREFIX}/$(basename "$file")"
   
-  for db in "${DBS_ARRAY[@]}"; do
-    # Limpiar espacios en blanco
-    db=$(echo "$db" | xargs)
-    if [ -n "$db" ]; then
-      backup_single_db "$db" || true  # Continuar aunque falle una BD
+  log_info "Subiendo a S3: $s3_key"
+  
+  if aws s3 cp "$file" "s3://${S3_BUCKET}/$s3_key" --storage-class STANDARD_IA; then
+    log_info "S3 upload exitoso: $s3_key"
+    if [[ "${KEEP_LOCAL:-true}" == "false" ]]; then
+      rm -f "$file"
+      log_info "Archivo local eliminado: $(basename "$file")"
     fi
-  done
-  
-elif [ -n "${MONGO_DB:-}" ]; then
-  # Una sola base de datos (compatibilidad hacia atrás)
-  echo "Modo BD única: ${MONGO_DB}"
-  TOTAL_COUNT=1
-  backup_single_db "$MONGO_DB"
-  
-else
-  # Todas las bases de datos del cluster
-  echo "Modo todas las BD del cluster"
-  ARCHIVE_NAME="${BACKUP_PREFIX:-backup}_all_${NOW}.gz"
-  ARCHIVE_PATH="${OUTPUT_DIR}/${ARCHIVE_NAME}"
-  TOTAL_COUNT=1
-  
-  echo "Iniciando mongodump completo..."
-  if mongodump --uri="$MONGO_URI" --archive="$ARCHIVE_PATH" --gzip; then
-    echo "✅ Backup completo exitoso: ${ARCHIVE_PATH}"
-    
-    # Upload to S3 if configured
-    if [[ "${S3_UPLOAD:-false}" == "true" ]]; then
-      echo "Subiendo backup completo a S3..."
-      if python3 /app/s3_upload.py "$ARCHIVE_PATH"; then
-        echo "✅ Upload S3 exitoso para backup completo"
-        # Remove local file if configured
-        if [[ "${KEEP_LOCAL_BACKUP:-true}" == "false" ]]; then
-          rm -f "$ARCHIVE_PATH"
-          echo "🗑️  Archivo local eliminado: ${ARCHIVE_NAME}"
-        fi
-      else
-        echo "❌ Error en upload S3 del backup completo"
-        notify_error "ALL" "Upload a S3 falló"
-        FAILED_DBS+=("ALL_S3")
-      fi
-    fi
-    
-    SUCCESS_COUNT=1
   else
-    echo "❌ Error en backup completo"
-    FAILED_DBS+=("ALL")
-    notify_error "ALL" "mongodump completo falló"
+    log_error "S3 upload falló: $s3_key"
+    return 1
   fi
-fi
+}
 
-# Retención
-if [ "${RETENTION_DAYS}" -gt 0 ]; then
-  echo "Aplicando retención: ${RETENTION_DAYS} días"
-  find "$OUTPUT_DIR" -type f -name "${BACKUP_PREFIX:-backup}_*.gz" -mtime +${RETENTION_DAYS} -print -delete || true
-fi
+mkdir -p "$DEST_DIR" "$LOG_DIR"
 
-# Notificar resumen
-notify_summary
+SUCCESS_COUNT=0
+FAILED_COUNT=0
 
-# Marca último OK (para healthcheck) solo si al menos una BD fue exitosa
-if [ $SUCCESS_COUNT -gt 0 ]; then
-  date -Is > /app/last_success.txt
-  echo "OK: backup finalizado. Exitosos: ${SUCCESS_COUNT}/${TOTAL_COUNT}"
-  exit 0
-else
-  echo "ERROR: Todos los backups fallaron"
-  exit 1
-fi
+cleanup_old_backups() {
+  if [ "$RETENTION_DAYS" -gt 0 ]; then
+    log_info "Aplicando retención: $RETENTION_DAYS días"
+    find "$DEST_DIR" -type f -name "${FILE_PREFIX}_*.archive.gz" -mtime +$RETENTION_DAYS -delete 2>/dev/null || true
+  fi
+}
+
+main() {
+  log_info "=== Iniciando backup MongoDB ==="
+  log_info "URI: ${MONGODB_URI%/*}/**"
+  log_info "Destino: $DEST_DIR"
+  log_info "Retención: $RETENTION_DAYS días"
+  
+  if [ -n "$DBS" ]; then
+    log_info "BDs específicas: $DBS"
+    IFS=',' read -ra DB_LIST <<< "$DBS"
+    
+    for db in "${DB_LIST[@]}"; do
+      db=$(echo "$db" | xargs)
+      if [ -n "$db" ]; then
+        if backup_database "$db"; then
+          ((SUCCESS_COUNT++))
+        else
+          ((FAILED_COUNT++))
+        fi
+      fi
+    done
+  else
+    log_info "Backup completo del cluster"
+    local archive_file="${DEST_DIR}/${FILE_PREFIX}_all_${NOW}.archive.gz"
+    
+    if mongodump --uri="$MONGODB_URI" --archive="$archive_file" --gzip; then
+      log_info "Dump completo exitoso"
+      
+      if validate_archive "$archive_file"; then
+        log_info "Backup completo válido"
+        
+        if [[ "${S3_BUCKET:-}" ]]; then
+          s3_upload "$archive_file"
+        fi
+        
+        ((SUCCESS_COUNT++))
+      else
+        rm -f "$archive_file"
+        log_error "Backup completo inválido"
+        ((FAILED_COUNT++))
+      fi
+    else
+      log_error "mongodump completo falló"
+      ((FAILED_COUNT++))
+    fi
+  fi
+  
+  cleanup_old_backups
+  
+  log_info "=== Resumen final ==="
+  log_info "Exitosos: $SUCCESS_COUNT"
+  log_info "Fallidos: $FAILED_COUNT"
+  
+  if [ $SUCCESS_COUNT -gt 0 ]; then
+    log_info "Backup completado con éxito"
+    exit 0
+  else
+    log_error "Todos los backups fallaron"
+    exit 1
+  fi
+}
+
+main "$@"
